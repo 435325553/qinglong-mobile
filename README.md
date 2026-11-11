@@ -1,0 +1,109 @@
+# 青龙助手 · qinglong-mobile
+
+一个给 [青龙面板](https://github.com/whyour/qinglong) 用的 Android 客户端：手机上查任务、跑任务、看日志、管环境变量。
+
+原生 Java 手写，**不依赖 Gradle / AndroidX / 任何第三方库**，安装包 57 KB，Android 5.0+ 可用。**
+
+- 支持两种接入：面板**账号密码**，或青龙「应用管理」里的 **Client ID / Secret**（OpenAPI）
+- 已在青龙 **2.24.0** 实机验证（任务 / 变量 / 日志 / 启停 / 运行接口全通）
+
+## 功能
+
+| 页面 | 能做什么 |
+|---|---|
+| 概览 | 面板版本、Node、系统、内存、磁盘；任务总数 / 已启用 / 运行中 / 变量数；最近执行 8 条 |
+| 任务 | 搜索任务名或命令；看状态（已启用 / 已停用 / 运行中）；点进任务可**立即运行、停止、启用/停用、查看日志**（等宽字体、可选中复制）、复制命令；显示上次执行时间与耗时 |
+| 变量 | 搜索变量名或备注；值默认脱敏，可一键显示；复制值、复制 `名称=值`、启用/停用 |
+| 设置 | 切换登录方式、改地址与凭据、记住登录、忽略 HTTPS 证书校验、退出登录 |
+
+其他：
+- 登录后 token 本地保存，下次自动登录；失效自动重登
+- 面板开了「两步验证」时，会弹窗要求 6 位验证码
+- 登录失败会明确告诉你原因：密码错、IP 被拉黑、失败次数过多、连接被拒、超时、证书错误、没连同一 WiFi……（见下）
+
+### 登录失败的提示
+
+错误以红色横幅显示在登录页顶部，点一下可复制全文。
+
+| 情况 | 提示 |
+|---|---|
+| 密码错误 | `登录失败(401)：用户名或密码错误` |
+| IP 被拉黑 | 附「去青龙后台 IP 黑名单解封」 |
+| 失败次数过多 | 附「按提示秒数后再试」 |
+| 面板未初始化 | 附「先在网页端完成初始化」 |
+| 找不到地址 / 连接被拒 / 超时 | 对应中文原因 + 原始报错 |
+| HTTPS 自签名证书 | 提示勾选「忽略 HTTPS 证书校验」 |
+| 面板是局域网地址但手机没连 WiFi | 发请求前就拦下并提示 |
+| 手机完全没有网络 | 直接提示没有网络 |
+
+## 安装
+
+1. 从右侧 **Releases** 下载最新的 `qinglong-assistant-vX.Y.apk`
+2. 传到手机安装（允许「未知来源」）
+3. 打开 App，填面板地址（例如 `http://192.168.1.10:5700`）与凭据，登录
+
+> 局域网直连面板请让手机连同一 WiFi；外网使用需要面板做了端口映射或反向代理。
+
+## 用 Client ID 接入
+
+青龙面板 →「应用管理」→ 新建应用，拿到 `Client ID` 和 `Client Secret`，回到 App 切到 **Client ID** 方式填入即可。
+
+客户端行为：`GET /open/auth/token?client_id=&client_secret=` 取 token，之后所有请求走 `/open/*`，请求头 `Authorization: Bearer <token>`。
+
+- 新版青龙（2.24+）用 `client_id / client_secret`
+- 更老的版本用 `appid / appsecret`，客户端两种参数都会试
+
+## 自己编译
+
+不需要 Android Studio，只要命令行工具链（这也是本项目体积小、无依赖的原因）。
+
+依赖：
+- JDK 11
+- Android **build-tools 34.0.0**（提供 `aapt2` / `d8` / `zipalign` / `apksigner`）
+- Android **platform-32** 的 `android.jar`
+
+```bash
+export ANDROID_SDK_HOME=/path/to/sdk     # 结构：build-tools/34.0.0、platforms/android-32
+./build.sh                               # 产出 build/qinglong-assistant.apk
+```
+
+`build.sh` 里做的事：`aapt2 compile` → `aapt2 link` → `javac`（target 8）→ `d8` → 打 zip → `zipalign` → `apksigner`。首次运行会生成一个本地签名密钥（密码可用 `KEYSTORE_PASS` 覆盖），**请勿把密钥提交进仓库**。
+
+## 目录结构
+
+```
+AndroidManifest.xml          清单：单 Activity、minSdk 21、允许明文 HTTP
+res/                         图标（5 个密度 PNG）、深色主题、字符串
+src/com/ql/assistant/
+  MainActivity.java          全部界面与交互（程序化布局，无需 XML 布局）
+  QlClient.java              HTTP 客户端：HttpURLConnection + org.json
+build.sh                     无 Gradle 打包脚本
+docs/API.md                  用到的青龙接口与字段口径
+```
+
+## 生命周期里的坑（已踩过）
+
+- **时间戳是秒**：青龙返回的 `last_execution_time` 是秒级，按毫秒解析会把「上次执行」显示成 1970 年。客户端做了秒/毫秒识别。
+- **`last_running_time` 不是时间**：它是上次执行耗时（秒），别当时间戳用。
+- **列表包装层不固定**：任务列表可能在 `data`，也可能在 `data.data`，客户端两处都找。
+- **日志返回类型不固定**：可能是字符串，也可能是行数组，客户端都兼容。
+- **`/open` 是 `/api` 的别名**：服务端把 `/open/*` 改写到 `/api/*`，鉴权头同样是 `Authorization: Bearer`。
+
+## 已知限制
+
+- 任务列表单次最多取 200 条（用搜索过滤）
+- 未实现：脚本在线编辑、依赖管理、通知配置、日志文件列表
+- 凭据存于应用私有 `SharedPreferences`（未加密），别装在公用机上
+- 只在青龙 2.24 上做过接口验证，其他版本按向后兼容写法处理，未逐一测试
+
+## 贡献
+
+欢迎 issue / PR。改代码时请保持「零第三方依赖」这条底线，否则手工构建链会失效。
+
+## License
+
+[MIT](LICENSE)
+
+## 免责声明
+
+本项目与青龙面板官方无关，仅为第三方客户端。使用前请确保你拥有面板的管理权限；因误操作（如停止任务、禁用变量）造成的后果由使用者自负。
