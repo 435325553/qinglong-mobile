@@ -38,8 +38,12 @@
 | 用途 | 请求 |
 |---|---|
 | 列表 | `GET /api/crons?searchValue=&page=1&size=200` → `data.data[]`、`data.total` |
-| 运行 / 停止 | `PUT /api/crons/run` / `PUT /api/crons/stop`，body `{"ids":[1,2]}` |
-| 启用 / 停用 | `PUT /api/crons/enable` / `PUT /api/crons/disable`，body `{"ids":[...]}` |
+| 新建任务 | `POST /api/crons`，body `{"name","command","schedule"}`（command、schedule 必填） |
+| 编辑任务 | `PUT /api/crons`，body `{"id","name","command","schedule"}` |
+| 运行 / 停止 | `PUT /api/crons/run` / `stop`，body **纯数组** `[1,2]` |
+| 启用 / 停用 | `PUT /api/crons/enable` / `disable`，body **纯数组** `[...]` |
+| 删除任务 | `DELETE /api/crons`，body **纯数组** `[...]` |
+| 脚本上传 | `POST /api/scripts`，multipart：`filename`(必填) + `path`(可空) + `file`(二进制) |
 | 日志 | `GET /api/crons/{id}/log?tail=true&limit=200000` |
 
 任务字段口径：
@@ -58,7 +62,10 @@
 |---|---|
 | 列表 | `GET /api/envs?searchValue=` → `data[]` |
 | 启用 / 停用 | `PUT /api/envs/enable` / `PUT /api/envs/disable`，body `{"ids":[...]}` |
-| 新增 / 修改 / 删除 | `POST` / `PUT` / `DELETE /api/envs` |
+| 新增 | `POST /api/envs`，body **数组** `[{"name","value","remarks"}]`，value 必须非空 |
+| 修改 | `PUT /api/envs`，body `{"id","name","value","remarks"}` |
+| 删除 | `DELETE /api/envs`，body **纯数组** |
+| 启停 | `PUT /api/envs/enable|disable`，body **纯数组** |
 
 变量字段：`name`、`value`、`remarks`、`status`（0 正常 / 1 禁用）。
 
@@ -73,3 +80,13 @@
 2. **日志类型不固定**：`data` 既可能是整段字符串，也可能是按行拆的数组。
 3. **时间单位混用**：同一份数据里 `last_execution_time` 是秒级时间戳，`last_running_time` 是秒数耗时。判断方法：小于 `1e8` 的值不可能是时间戳。
 4. **错误码不等于 HTTP 状态**：青龙习惯 HTTP 200 + `code` 字段表达业务错误（401/420/410 都见过），只看 HTTP 状态会漏。
+
+## 本地存储（SharedPreferences `ql`）
+
+| key | 内容 |
+|---|---|
+| `base` / `mode` / `user` / `pwd` / `openId` / `openSecret` | 上次登录的地址、方式与凭据（密码类仅在勾选「记住」时保存） |
+| `token` | 登录态，勾选「记住」时保存 |
+| `theme` | `dark` / `light` |
+| `hideHost` | 顶部地址是否遮蔽 |
+| `servers` | 历史服务器 JSON 数组，元素 `{base, mode, account, secret, ts}`，最多 8 条 |

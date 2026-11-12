@@ -6,21 +6,32 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
+import android.net.Uri;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -42,15 +53,55 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
-    static final int C_BG = 0xFF0D1117;
-    static final int C_CARD = 0xFF161E26;
-    static final int C_FIELD = 0xFF1E2731;
-    static final int C_TEXT = 0xFFE6EDF3;
-    static final int C_SUB = 0xFF8B98A5;
-    static final int C_ACC = 0xFF2BD96A;
-    static final int C_WARN = 0xFFFFA657;
-    static final int C_RED = 0xFFF85149;
-    static final int C_LINE = 0xFF243040;
+    // 调色板：深色 / 浅色两版共用这一组字段，运行时切换后重绘界面
+    int C_BG, C_CARD, C_FIELD, C_TEXT, C_SUB, C_ACC, C_WARN, C_RED, C_LINE;
+    int C_PRESS, C_PILL, C_ACC_BG, C_ACC_LINE, C_ON_ACC, C_HINT, C_ERR_BG, C_META, C_LOG_BG, C_LOG_TEXT;
+
+    /** 深色 / 浅色 */
+    private void applyTheme(String theme) {
+        boolean dark = !"light".equals(theme);
+        if (dark) {
+            C_BG = 0xFF0D1117; C_CARD = 0xFF161E26; C_FIELD = 0xFF1E2731;
+            C_TEXT = 0xFFE6EDF3; C_SUB = 0xFF8B98A5; C_ACC = 0xFF2BD96A;
+            C_WARN = 0xFFFFA657; C_RED = 0xFFF85149; C_LINE = 0xFF243040;
+            C_PRESS = 0xFF202B37; C_PILL = 0xFF1E2731; C_ACC_BG = 0xFF12281A;
+            C_ACC_LINE = 0x662BD96A; C_ON_ACC = 0xFF06210F; C_HINT = 0xFF5A6773;
+            C_ERR_BG = 0xFF2A1717; C_META = 0xFF6B7885;
+            C_LOG_BG = 0xFF10161C; C_LOG_TEXT = 0xFFC9D4E0;
+        } else {
+            C_BG = 0xFFF4F6F8; C_CARD = 0xFFFFFFFF; C_FIELD = 0xFFE9EDF1;
+            C_TEXT = 0xFF11181F; C_SUB = 0xFF65707C; C_ACC = 0xFF0F9147;
+            C_WARN = 0xFFB45309; C_RED = 0xFFC92C27; C_LINE = 0xFFDEE3E9;
+            C_PRESS = 0xFFE6EBF0; C_PILL = 0xFFE8EDF2; C_ACC_BG = 0xFFE3F6EA;
+            C_ACC_LINE = 0x550F9147; C_ON_ACC = 0xFFFFFFFF; C_HINT = 0xFF9AA4B0;
+            C_ERR_BG = 0xFFFDECEB; C_META = 0xFF8892A0;
+            C_LOG_BG = 0xFFF1F4F7; C_LOG_TEXT = 0xFF25313C;
+        }
+        themeName = dark ? "dark" : "light";
+        applySystemBars(dark);
+    }
+
+    /** 对话框跟着当前主题走，浅色版用浅色对话框 */
+    private AlertDialog.Builder dlg() {
+        return "dark".equals(themeName)
+                ? new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                : new AlertDialog.Builder(this, android.R.style.Theme_Material_Light_Dialog_Alert);
+    }
+
+    /** 状态栏 / 导航栏跟着主题走，浅色主题用深色图标 */
+    private void applySystemBars(boolean dark) {
+        try {
+            getWindow().setStatusBarColor(C_BG);
+            getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(C_BG));
+            getWindow().setNavigationBarColor(C_BG);
+            View decor = getWindow().getDecorView();
+            int f = decor.getSystemUiVisibility() & ~0x2000 & ~0x10; // LIGHT_STATUS_BAR / LIGHT_NAVIGATION_BAR
+            if (!dark) f |= 0x2000 | 0x10;
+            decor.setSystemUiVisibility(f);
+        } catch (Exception e) {
+            // 个别 ROM 不支持，忽略
+        }
+    }
 
     static class Cron {
         long id;
@@ -71,6 +122,72 @@ public class MainActivity extends Activity {
         int status = 0;
     }
 
+    /** 画一只眼睛：睁眼=内容可见，闭眼带斜杠=已隐藏 */
+    static class EyeDrawable extends Drawable {
+        private int color;
+        private boolean open;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        EyeDrawable(int color, boolean open) {
+            this.color = color;
+            this.open = open;
+            p.setStrokeCap(Paint.Cap.ROUND);
+        }
+
+        void setOpen(boolean o) {
+            open = o;
+            invalidateSelf();
+        }
+
+        boolean isOpen() {
+            return open;
+        }
+
+        void setColor(int c) {
+            color = c;
+            invalidateSelf();
+        }
+
+        public void draw(Canvas c) {
+            Rect b = getBounds();
+            float cx = b.centerX(), cy = b.centerY();
+            float w = b.width(), h = b.height();
+            float ex = w * 0.46f, ey = h * 0.24f;
+            p.setColor(color);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(Math.max(1.2f, h * 0.08f));
+            path.reset();
+            path.moveTo(cx - ex, cy);
+            path.cubicTo(cx - ex * 0.45f, cy - ey * 1.9f, cx + ex * 0.45f, cy - ey * 1.9f, cx + ex, cy);
+            path.cubicTo(cx + ex * 0.45f, cy + ey * 1.9f, cx - ex * 0.45f, cy + ey * 1.9f, cx - ex, cy);
+            c.drawPath(path, p);
+            p.setStyle(Paint.Style.FILL);
+            c.drawCircle(cx, cy, Math.max(1.5f, h * 0.14f), p);
+            if (!open) {
+                p.setStyle(Paint.Style.STROKE);
+                c.drawLine(cx - ex * 0.9f, cy + ey * 1.15f, cx + ex * 0.9f, cy - ey * 1.15f, p);
+            }
+        }
+
+        public void setAlpha(int a) { p.setAlpha(a); }
+
+        public void setColorFilter(android.graphics.ColorFilter cf) { p.setColorFilter(cf); }
+
+        public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+
+        private int iw = 44, ih = 32;
+
+        void setIntrinsic(int w, int h) {
+            iw = w;
+            ih = h;
+        }
+
+        public int getIntrinsicWidth() { return iw; }
+
+        public int getIntrinsicHeight() { return ih; }
+    }
+
     private SharedPreferences sp;
     private QlClient client;
     private String token;
@@ -84,6 +201,7 @@ public class MainActivity extends Activity {
     private boolean loading = false;
     private String errMsg = null;
     private String searchCron = "";
+    private String sortMode = "last";
     private String searchEnv = "";
     private boolean envShowValue = false;
 
@@ -97,12 +215,17 @@ public class MainActivity extends Activity {
     private ProgressBar busyBar;
 
     private String loginMode = "pwd";
+    private String themeName = "dark";
+    private boolean hideHost = false;
     private String fBase = "", fUser = "", fPass = "", fId = "", fSecret = "";
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         sp = getSharedPreferences("ql", MODE_PRIVATE);
+        themeName = sp.getString("theme", "dark");
+        applyTheme(themeName);
+        hideHost = sp.getBoolean("hideHost", false);
         ignoreCert = sp.getBoolean("ignoreCert", false);
         remember = sp.getBoolean("remember", true);
         loginMode = sp.getString("mode", "pwd");
@@ -111,6 +234,7 @@ public class MainActivity extends Activity {
         fPass = sp.getString("pwd", "");
         fId = sp.getString("openId", "");
         fSecret = sp.getString("openSecret", "");
+        sortMode = sp.getString("cronSort", "last");
         String savedToken = sp.getString("token", "");
         client = new QlClient(fBase, ignoreCert);
         client.prefix = "open".equals(loginMode) ? "/open" : "/api";
@@ -187,6 +311,204 @@ public class MainActivity extends Activity {
         return fUser.length() > 0 && fPass.length() > 0;
     }
 
+    // ---------------- 历史服务器 ----------------
+
+    private static final int HIST_MAX = 8;
+
+    private JSONArray histArray() {
+        try {
+            return new JSONArray(sp.getString("servers", "[]"));
+        } catch (Exception e) {
+            return new JSONArray();
+        }
+    }
+
+    private int histCount() {
+        return histArray().length();
+    }
+
+    /** 登录成功后记一条：同一地址只留最新，最多 8 条 */
+    private void pushHistory(String base, String mode, String account, String secret) {
+        if (base == null || base.length() == 0) return;
+        JSONArray old = histArray();
+        JSONArray now = new JSONArray();
+        try {
+            now.put(new JSONObject()
+                    .put("base", base)
+                    .put("mode", mode)
+                    .put("account", account == null ? "" : account)
+                    .put("secret", remember && secret != null ? secret : "")
+                    .put("ts", System.currentTimeMillis()));
+        } catch (Exception e) {
+            return;
+        }
+        for (int i = 0; i < old.length(); i++) {
+            JSONObject o = old.optJSONObject(i);
+            if (o == null) continue;
+            if (base.equalsIgnoreCase(o.optString("base", ""))) continue;
+            now.put(o);
+            if (now.length() >= HIST_MAX) break;
+        }
+        sp.edit().putString("servers", now.toString()).apply();
+    }
+
+    private void removeHistory(String base) {
+        JSONArray old = histArray();
+        JSONArray now = new JSONArray();
+        for (int i = 0; i < old.length(); i++) {
+            JSONObject o = old.optJSONObject(i);
+            if (o == null) continue;
+            if (base.equalsIgnoreCase(o.optString("base", ""))) continue;
+            now.put(o);
+        }
+        sp.edit().putString("servers", now.toString()).apply();
+    }
+
+    private void clearHistory() {
+        sp.edit().putString("servers", "[]").apply();
+    }
+
+    /** 点历史记录：填入地址与凭据，本机存过密钥就直接连 */
+    private void useHistory(String base, String mode, String account, String secret) {
+        errMsg = null;
+        fBase = base;
+        loginMode = mode;
+        if ("open".equals(mode)) {
+            fId = account != null && account.length() > 0 ? account : sp.getString("openId", "");
+            fSecret = secret != null && secret.length() > 0 ? secret : sp.getString("openSecret", "");
+            if (fId.length() > 0 && fSecret.length() > 0) {
+                startOpenLogin(base, fId, fSecret, remember, ignoreCert);
+                return;
+            }
+            toast("已填入地址，" + (fId.length() == 0 ? "补个 Client ID" : "补个 Secret") + "就能连");
+        } else {
+            fUser = account != null && account.length() > 0 ? account : sp.getString("user", "");
+            fPass = secret != null && secret.length() > 0 ? secret : sp.getString("pwd", "");
+            if (fUser.length() > 0 && fPass.length() > 0) {
+                startPwdLogin(base, fUser, fPass, remember, ignoreCert);
+                return;
+            }
+            toast("已填入地址，" + (fUser.length() == 0 ? "补个用户名" : "补个密码") + "就能连");
+        }
+        render();
+    }
+
+    private android.graphics.drawable.StateListDrawable rowPressBg() {
+        android.graphics.drawable.StateListDrawable s =
+                new android.graphics.drawable.StateListDrawable();
+        s.addState(new int[]{android.R.attr.state_pressed}, bg(C_PRESS, 10));
+        s.addState(new int[]{}, bg(0x00000000, 10));
+        return s;
+    }
+
+    /** 登录页顶部的历史服务器卡片 */
+    private void renderHistory() {
+        JSONArray arr = histArray();
+        if (arr.length() == 0) return;
+
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        head.setLayoutParams(hlp);
+        TextView title = tv("历史服务器 · " + arr.length(), 13, C_TEXT, true);
+        title.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(title);
+        TextView clr = tv("清空", 11, C_SUB, false);
+        clr.setPadding(dp(10), dp(4), dp(2), dp(4));
+        clr.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                dlg()
+                        .setTitle("清空历史服务器")
+                        .setMessage("只清空地址列表，不影响已保存的登录状态。")
+                        .setPositiveButton("清空", new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface d, int w) {
+                                clearHistory();
+                                render();
+                            }
+                        })
+                        .setNegativeButton("取消", null)
+                        .show();
+            }
+        });
+        head.addView(clr);
+        c.addView(head);
+
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) continue;
+            final String base = o.optString("base", "");
+            final String mode = o.optString("mode", "pwd");
+            final String acc = o.optString("account", "");
+            final String sec = o.optString("secret", "");
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(6), dp(9), dp(6), dp(9));
+            row.setBackground(rowPressBg());
+            row.setClickable(true);
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rlp.topMargin = dp(2);
+            row.setLayoutParams(rlp);
+
+            LinearLayout txt = new LinearLayout(this);
+            txt.setOrientation(LinearLayout.VERTICAL);
+            txt.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            TextView b = tv(shortHost(base), 13, C_TEXT, false);
+            b.setSingleLine(true);
+            b.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            String meta = ("open".equals(mode) ? "Client ID" : "账号密码")
+                    + (acc.length() > 0 ? " · " + acc : "")
+                    + (sec.length() > 0 ? " · 已存凭据" : "");
+            TextView m = tv(meta, 11, C_SUB, false);
+            m.setSingleLine(true);
+            txt.addView(b);
+            txt.addView(m);
+            row.addView(txt);
+
+            TextView go = tv("连接", 12, C_ACC, true);
+            go.setPadding(dp(10), dp(4), dp(2), dp(4));
+            row.addView(go);
+
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    useHistory(base, mode, acc, sec);
+                }
+            });
+            row.setOnLongClickListener(new View.OnLongClickListener() {
+                public boolean onLongClick(View v) {
+                    dlg()
+                            .setTitle("删除这条记录")
+                            .setMessage(base)
+                            .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                                public void onClick(DialogInterface d, int w) {
+                                    removeHistory(base);
+                                    render();
+                                }
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                    return true;
+                }
+            });
+            c.addView(row);
+        }
+
+        TextView tip = tv("点一下直接连，长按删除", 11, C_META, false);
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tl.topMargin = dp(8);
+        tip.setLayoutParams(tl);
+        c.addView(tip);
+        contentBox.addView(c);
+    }
+
+
     private void autoLogin() {
         if ("open".equals(loginMode)) startOpenLogin(fBase, fId, fSecret, true, ignoreCert);
         else startPwdLogin(fBase, fUser, fPass, true, ignoreCert);
@@ -250,7 +572,7 @@ public class MainActivity extends Activity {
     private LinearLayout pressCard() {
         LinearLayout c = card();
         android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
-        s.addState(new int[]{android.R.attr.state_pressed}, cardBgColor(0xFF202B37));
+        s.addState(new int[]{android.R.attr.state_pressed}, cardBgColor(C_PRESS));
         s.addState(new int[]{}, cardBgColor(C_CARD));
         c.setBackground(s);
         c.setClickable(true);
@@ -291,18 +613,47 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         titleBox.setLayoutParams(tlp);
         titleBox.addView(tv("青龙助手", 17, C_TEXT, true));
+
+        // 地址 + 眼睛：可隐藏/显示服务器地址
+        LinearLayout subRow = new LinearLayout(this);
+        subRow.setOrientation(LinearLayout.HORIZONTAL);
+        subRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        srlp.topMargin = dp(2);
+        subRow.setLayoutParams(srlp);
+
         subtitle = tv("未连接", 11, C_SUB, false);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(2);
-        subtitle.setLayoutParams(slp);
         subtitle.setSingleLine(true);
-        titleBox.addView(subtitle);
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        subtitle.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        subRow.addView(subtitle);
+
+        ImageView eye = new ImageView(this);
+        eye.setImageDrawable(new EyeDrawable(C_SUB, !hideHost));
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(dp(30), dp(24));
+        elp.leftMargin = dp(6);
+        eye.setLayoutParams(elp);
+        eye.setPadding(dp(2), dp(2), dp(2), dp(2));
+        eye.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                hideHost = !hideHost;
+                sp.edit().putBoolean("hideHost", hideHost).apply();
+                ImageView iv = (ImageView) v;
+                Drawable d = iv.getDrawable();
+                if (d instanceof EyeDrawable) ((EyeDrawable) d).setOpen(!hideHost);
+                render();
+                toast(hideHost ? "服务器地址已隐藏" : "服务器地址已显示");
+            }
+        });
+        subRow.addView(eye);
+        titleBox.addView(subRow);
         header.addView(titleBox);
 
         statePill = tv("离线", 10, C_SUB, false);
         statePill.setPadding(dp(8), dp(3), dp(8), dp(3));
-        statePill.setBackground(bg(0xFF1E2731, 10));
+        statePill.setBackground(bg(C_PILL, 10));
         header.addView(statePill);
 
         TextView refresh = tv("刷新", 12, C_ACC, true);
@@ -391,8 +742,9 @@ public class MainActivity extends Activity {
         boolean connected = token != null && client != null && client.baseUrl.length() > 0;
         statePill.setText(connected ? (loading ? "同步中" : "已连接") : "未登录");
         statePill.setTextColor(connected ? C_ACC : C_SUB);
-        statePill.setBackground(bg(connected ? 0xFF12281A : 0xFF1E2731, 10));
-        subtitle.setText(connected ? shortHost(client.baseUrl) : "未连接面板");
+        statePill.setBackground(bg(connected ? C_ACC_BG : C_PILL, 10));
+        subtitle.setText(connected ? (hideHost ? "•••••••• 地址已隐藏" : shortHost(client.baseUrl))
+                : "未连接面板");
         if (errMsg != null) contentBox.addView(errorBanner(errMsg));
         if (token == null) {
             renderLogin();
@@ -420,7 +772,7 @@ public class MainActivity extends Activity {
     private View errorBanner(String msg) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(bg(0xFF2A1717, 12));
+        box.setBackground(bg(C_ERR_BG, 12));
         box.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -474,6 +826,7 @@ public class MainActivity extends Activity {
     // ---------------- 登录页 ----------------
 
     private void renderLogin() {
+        renderHistory();
         LinearLayout c = card();
         c.addView(tv("连接青龙面板", 15, C_TEXT, true));
         TextView sub = tv2("面板账号密码，或 OpenAPI 的 Client ID / Secret", 12, C_SUB);
@@ -523,7 +876,7 @@ public class MainActivity extends Activity {
         c.addView(cbRemember);
         c.addView(cbIgnore);
 
-        TextView btn = button("登录", C_ACC, 0xFF06210F);
+        TextView btn = button("登录", C_ACC, C_ON_ACC);
         btn.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 boolean rem = cbRemember.isChecked();
@@ -581,12 +934,40 @@ public class MainActivity extends Activity {
         e.setText(value);
         e.setTextSize(13);
         e.setTextColor(C_TEXT);
-        e.setHintTextColor(0xFF5A6773);
+        e.setHintTextColor(C_HINT);
         e.setSingleLine(true);
         e.setBackground(bg(C_FIELD, 10));
         e.setPadding(dp(12), dp(10), dp(12), dp(10));
         e.setMinHeight(dp(46));
-        if (password) e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        if (password) {
+            e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            // 输入框右侧的眼睛：点一下显示 / 再点隐藏
+            final EyeDrawable eye = new EyeDrawable(C_SUB, false);
+            eye.setIntrinsic(dp(20), dp(14));
+            e.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, eye, null);
+            e.setCompoundDrawablePadding(dp(8));
+            e.setOnTouchListener(new View.OnTouchListener() {
+                public boolean onTouch(View v, MotionEvent ev) {
+                    if (ev.getAction() != MotionEvent.ACTION_UP) return false;
+                    Drawable d = e.getCompoundDrawablesRelative()[2];
+                    if (d == null) return false;
+                    int x = (int) ev.getX();
+                    int edge = e.getWidth() - e.getPaddingRight();
+                    if (x < edge - d.getBounds().width() - dp(6)) return false;
+                    boolean show = !eye.isOpen();
+                    eye.setOpen(show);
+                    int pos = e.getText().length();
+                    e.setInputType(show
+                            ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                            : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                    try {
+                        e.setSelection(Math.min(pos, e.getText().length()));
+                    } catch (Exception ignore) {
+                    }
+                    return true;
+                }
+            });
+        }
         else e.setInputType(InputType.TYPE_CLASS_TEXT);
         e.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -605,6 +986,8 @@ public class MainActivity extends Activity {
         cb.setTextSize(12);
         cb.setTextColor(C_SUB);
         cb.setChecked(checked);
+        cb.setButtonTintList(new android.content.res.ColorStateList(
+                new int[][]{{android.R.attr.state_checked}, {}}, new int[]{C_ACC, C_SUB}));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(8);
@@ -750,6 +1133,29 @@ public class MainActivity extends Activity {
     // ---------------- 任务 ----------------
 
     private void renderCrons() {
+        LinearLayout tools = card();
+        LinearLayout trow = new LinearLayout(this);
+        trow.setOrientation(LinearLayout.HORIZONTAL);
+        TextView up = miniButton("上传脚本");
+        up.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                pickScript();
+            }
+        });
+        TextView add = miniButton("新建任务");
+        LinearLayout.LayoutParams alp = (LinearLayout.LayoutParams) add.getLayoutParams();
+        alp.rightMargin = 0;
+        add.setLayoutParams(alp);
+        add.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openCronEditor(null);
+            }
+        });
+        trow.addView(up);
+        trow.addView(add);
+        tools.addView(trow);
+        contentBox.addView(tools);
+
         LinearLayout searchBox = card();
         EditText e = inputFull(input("搜索任务名称 / 命令", searchCron, false));
         e.setBackground(bg(C_FIELD, 10));
@@ -763,6 +1169,27 @@ public class MainActivity extends Activity {
         });
         searchBox.setPadding(dp(10), dp(10), dp(10), dp(10));
         searchBox.addView(e);
+
+        LinearLayout sortRow = new LinearLayout(this);
+        sortRow.setOrientation(LinearLayout.HORIZONTAL);
+        sortRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        srlp.topMargin = dp(6);
+        sortRow.setLayoutParams(srlp);
+        TextView sortBtn = tv("排序：" + sortLabel(sortMode) + "  ▾", 11, C_ACC, true);
+        sortBtn.setPadding(dp(2), dp(4), dp(8), dp(4));
+        sortBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                showSortDialog();
+            }
+        });
+        sortRow.addView(sortBtn);
+        TextView cnt = tv("共 " + crons.size() + " 条", 11, C_META, false);
+        cnt.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        cnt.setGravity(Gravity.END);
+        sortRow.addView(cnt);
+        searchBox.addView(sortRow);
         contentBox.addView(searchBox);
 
         contentBox.addView(listHolder());
@@ -789,6 +1216,72 @@ public class MainActivity extends Activity {
         return listHolder;
     }
 
+    private String[] sortKeys() {
+        return new String[]{"last", "created", "name", "status", "stale"};
+    }
+
+    private String sortLabel(String mode) {
+        if ("created".equals(mode)) return "创建时间（新的在前）";
+        if ("name".equals(mode)) return "名称 A→Z";
+        if ("status".equals(mode)) return "状态优先（运行中在前）";
+        if ("stale".equals(mode)) return "最久未执行在前";
+        return "最近执行（默认）";
+    }
+
+    private void showSortDialog() {
+        final String[] keys = sortKeys();
+        String[] labels = new String[keys.length];
+        for (int i = 0; i < keys.length; i++) labels[i] = sortLabel(keys[i]);
+        int checked = 0;
+        for (int i = 0; i < keys.length; i++) if (keys[i].equals(sortMode)) checked = i;
+        dlg()
+                .setTitle("任务排序")
+                .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int which) {
+                        sortMode = keys[which];
+                        sp.edit().putString("cronSort", sortMode).apply();
+                        d.dismiss();
+                        render();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private Comparator<Cron> cronComparator() {
+        return new Comparator<Cron>() {
+            public int compare(Cron a, Cron b) {
+                if ("created".equals(sortMode)) {
+                    return Long.compare(b.id, a.id);
+                }
+                if ("name".equals(sortMode)) {
+                    String x = (a.name.length() > 0 ? a.name : a.command).toLowerCase(Locale.ROOT);
+                    String y = (b.name.length() > 0 ? b.name : b.command).toLowerCase(Locale.ROOT);
+                    int r = x.compareTo(y);
+                    return r != 0 ? r : Long.compare(b.id, a.id);
+                }
+                if ("status".equals(sortMode)) {
+                    int ra = statusRank(a), rb = statusRank(b);
+                    if (ra != rb) return ra - rb;
+                    return Long.compare(b.lastExec, a.lastExec);
+                }
+                if ("stale".equals(sortMode)) {
+                    int r = Long.compare(a.lastExec, b.lastExec);   // 没跑过的排最前
+                    return r != 0 ? r : Long.compare(a.id, b.id);
+                }
+                // 默认：最近执行在前，没执行过的垫底
+                int r = Long.compare(b.lastExec, a.lastExec);
+                return r != 0 ? r : Long.compare(b.id, a.id);
+            }
+        };
+    }
+
+    private int statusRank(Cron c) {
+        if (c.status == 0) return 0;        // 运行中
+        if (c.isDisabled == 1) return 2;    // 已停用
+        return 1;                            // 已启用
+    }
+
     private void fillCronList(LinearLayout holder) {
         List<Cron> list = new ArrayList<>();
         String q = searchCron.toLowerCase(Locale.ROOT);
@@ -798,11 +1291,7 @@ public class MainActivity extends Activity {
                 list.add(c);
             }
         }
-        Collections.sort(list, new Comparator<Cron>() {
-            public int compare(Cron a, Cron b) {
-                return Long.compare(b.id, a.id);
-            }
-        });
+        Collections.sort(list, cronComparator());
         holder.removeAllViews();
         if (list.isEmpty()) {
             LinearLayout empty = card();
@@ -843,7 +1332,7 @@ public class MainActivity extends Activity {
 
         String metaText = ago(c.lastExec);
         if (c.lastRun > 0) metaText = metaText + " · 耗时 " + dur(c.lastRun);
-        TextView meta = tv(metaText + " · 点击查看操作", 11, 0xFF6B7885, false);
+        TextView meta = tv(metaText + " · 点击查看操作", 11, C_META, false);
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp2.topMargin = dp(6);
@@ -858,6 +1347,20 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    private TextView miniButton(String label) {
+        TextView t = tv(label, 12, C_ACC, true);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(10), dp(9), dp(10), dp(9));
+        GradientDrawable g = bg(C_FIELD, 9);
+        g.setStroke(dp(1), C_LINE);
+        t.setBackground(g);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        lp.rightMargin = dp(8);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
     private String oneLine(String s) {
         if (s == null) return "";
         return s.replace("\n", " ").replace("\r", " ");
@@ -865,19 +1368,21 @@ public class MainActivity extends Activity {
 
     private void showCronActions(final Cron c) {
         final String[] items = {
+                "编辑任务",
                 "立即运行", "停止运行",
                 c.isDisabled == 1 ? "启用该任务" : "停用该任务",
                 "查看日志", "复制命令"};
 
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        AlertDialog.Builder b = dlg();
         b.setTitle(c.name.length() > 0 ? c.name : ("任务 #" + c.id));
         b.setItems(items, new DialogInterface.OnClickListener() {
             public void onClick(DialogInterface d, int which) {
-                if (which == 0) cronCmd(c, "run", "已提交运行");
-                else if (which == 1) cronCmd(c, "stop", "已提交停止");
-                else if (which == 2) cronCmd(c, c.isDisabled == 1 ? "enable" : "disable",
+                if (which == 0) openCronEditor(c);
+                else if (which == 1) cronCmd(c, "run", "已提交运行");
+                else if (which == 2) cronCmd(c, "stop", "已提交停止");
+                else if (which == 3) cronCmd(c, c.isDisabled == 1 ? "enable" : "disable",
                         c.isDisabled == 1 ? "已启用" : "已停用");
-                else if (which == 3) loadLog(c);
+                else if (which == 4) loadLog(c);
                 else copy(c.command);
             }
         });
@@ -888,9 +1393,9 @@ public class MainActivity extends Activity {
         pool.execute(new Runnable() {
             public void run() {
                 try {
-                    JSONObject body = new JSONObject();
-                    body.put("ids", new JSONArray().put(c.id));
-                    client.put("/api/crons/" + action, body);
+                    // 青龙 2.24 这几个接口要纯数组 body：[id]
+                    JSONArray body = new JSONArray().put(c.id);
+                    client.sendJson("PUT", "/api/crons/" + action, body.toString());
                     ui.post(new Runnable() {
                         public void run() {
                             toast(okMsg);
@@ -952,10 +1457,10 @@ public class MainActivity extends Activity {
     private void showLog(Cron c, String content) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(0xFF10161C);
+        box.setBackgroundColor(C_LOG_BG);
         box.setPadding(dp(12), dp(6), dp(12), dp(6));
         ScrollView sv = new ScrollView(this);
-        TextView t = tv(content, 11, 0xFFC9D4E0, false);
+        TextView t = tv(content, 11, C_LOG_TEXT, false);
         t.setTypeface(android.graphics.Typeface.MONOSPACE);
         t.setTextIsSelectable(true);
         t.setLineSpacing(dp(1), 1.0f);
@@ -966,7 +1471,7 @@ public class MainActivity extends Activity {
         wrap.addView(box, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
 
-        AlertDialog d = new AlertDialog.Builder(this)
+        AlertDialog d = dlg()
                 .setTitle("日志 · " + (c.name.length() > 0 ? c.name : ("#" + c.id)))
                 .setView(wrap)
                 .setPositiveButton("关闭", null)
@@ -992,6 +1497,14 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(toggle);
+        TextView addEnv = tv("＋新建", 12, C_ACC, true);
+        addEnv.setPadding(dp(10), dp(8), dp(4), dp(8));
+        addEnv.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openEnvEditor(null);
+            }
+        });
+        top.addView(addEnv);
         head.addView(top);
 
         EditText e = input("搜索变量名 / 备注", searchEnv, false);
@@ -1055,7 +1568,7 @@ public class MainActivity extends Activity {
             val.setLayoutParams(lp);
             box.addView(val);
             if (e.remarks.length() > 0) {
-                TextView r = tv(e.remarks, 11, 0xFF6B7885, false);
+                TextView r = tv(e.remarks, 11, C_META, false);
                 r.setSingleLine(true);
                 r.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 box.addView(r);
@@ -1076,15 +1589,17 @@ public class MainActivity extends Activity {
 
     private void showEnvActions(final EnvItem e) {
         final String[] items = {
+                "编辑变量",
                 "复制变量值",
                 e.status == 1 ? "启用该变量" : "禁用该变量",
                 "复制 名称=值"};
-        new AlertDialog.Builder(this)
+        dlg()
                 .setTitle(e.name)
                 .setItems(items, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int which) {
-                        if (which == 0) copy(e.value);
-                        else if (which == 2) copy(e.name + "=" + e.value);
+                        if (which == 0) openEnvEditor(e);
+                        else if (which == 1) copy(e.value);
+                        else if (which == 3) copy(e.name + "=" + e.value);
                         else envCmd(e, e.status == 1 ? "enable" : "disable");
                     }
                 })
@@ -1095,9 +1610,8 @@ public class MainActivity extends Activity {
         pool.execute(new Runnable() {
             public void run() {
                 try {
-                    JSONObject body = new JSONObject();
-                    body.put("ids", new JSONArray().put(e.id));
-                    client.put("/api/envs/" + action, body);
+                    JSONArray body = new JSONArray().put(e.id);
+                    client.sendJson("PUT", "/api/envs/" + action, body.toString());
                     ui.post(new Runnable() {
                         public void run() {
                             toast("enable".equals(action) ? "已启用" : "已禁用");
@@ -1113,6 +1627,780 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    // ---------------- 编辑：任务 / 变量 / 上传脚本 ----------------
+
+    private static final int REQ_SCRIPT = 2001;
+    private static final String[] MODE_KEYS = {"day", "week", "hour", "min", "month", "raw"};
+    private static final String[] MODE_LABELS = {"每天", "每周", "每小时", "每 N 分钟", "每月", "自定义"};
+    private static final int[] WEEK_VALUES = {1, 2, 3, 4, 5, 6, 0};
+    private static final String[] WEEK_LABELS = {"一", "二", "三", "四", "五", "六", "日"};
+
+    static class Sched {
+        String mode = "day";
+        int hour = 8, minute = 0, dom = 1, everyMin = 30, minInHour = 0;
+        final java.util.TreeSet<Integer> weeks = new java.util.TreeSet<Integer>();
+        String raw = "";
+    }
+
+    private int clampI(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private boolean isNum(String s) {
+        if (s == null || s.length() == 0) return false;
+        for (int i = 0; i < s.length(); i++) if (!Character.isDigit(s.charAt(i))) return false;
+        return true;
+    }
+
+    /** 把青龙的 cron 表达式翻成人能看懂的模式（能翻就翻，翻不出就落到自定义） */
+    private Sched parseSchedule(String expr) {
+        Sched s = new Sched();
+        s.raw = expr == null ? "" : expr.trim();
+        if (s.raw.length() == 0) return s;
+        String[] f = s.raw.split("\\s+");
+        if (f.length != 5) {
+            s.mode = "raw";
+            return s;
+        }
+        String mn = f[0], hr = f[1], dom = f[2], mon = f[3], dow = f[4];
+        try {
+            if (mn.startsWith("*/") && isNum(mn.substring(2)) && hr.equals("*") && dom.equals("*")
+                    && mon.equals("*") && dow.equals("*")) {
+                s.mode = "min";
+                s.everyMin = Integer.parseInt(mn.substring(2));
+                return s;
+            }
+            if (isNum(mn) && hr.equals("*") && dom.equals("*") && mon.equals("*") && dow.equals("*")) {
+                s.mode = "hour";
+                s.minInHour = Integer.parseInt(mn);
+                return s;
+            }
+            if (isNum(mn) && isNum(hr)) {
+                int m = Integer.parseInt(mn), h = Integer.parseInt(hr);
+                if (dom.equals("*") && mon.equals("*")) {
+                    if (dow.equals("*")) {
+                        s.mode = "day";
+                        s.minute = m;
+                        s.hour = h;
+                        return s;
+                    }
+                    if (dow.indexOf('/') < 0) {
+                        s.mode = "week";
+                        s.minute = m;
+                        s.hour = h;
+                        for (String d : dow.split(",")) {
+                            if (isNum(d)) s.weeks.add(Integer.parseInt(d));
+                        }
+                        if (s.weeks.isEmpty()) s.mode = "raw";
+                        return s;
+                    }
+                }
+                if (isNum(dom) && mon.equals("*") && dow.equals("*")) {
+                    s.mode = "month";
+                    s.minute = m;
+                    s.hour = h;
+                    s.dom = Integer.parseInt(dom);
+                    return s;
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        s.mode = "raw";
+        return s;
+    }
+
+    /** 把模式 + 参数拼回 cron（显示给人看的永远是"每天 08:30"这种） */
+    private String buildSchedule(Sched s) {
+        if ("raw".equals(s.mode)) return s.raw.trim();
+        String m = String.valueOf(clampI(s.minute, 0, 59));
+        String h = String.valueOf(clampI(s.hour, 0, 23));
+        if ("day".equals(s.mode)) return m + " " + h + " * * *";
+        if ("week".equals(s.mode)) {
+            StringBuilder w = new StringBuilder();
+            for (Integer d : s.weeks) {
+                if (w.length() > 0) w.append(",");
+                w.append(d);
+            }
+            if (w.length() == 0) w.append("1");
+            return m + " " + h + " * * " + w;
+        }
+        if ("hour".equals(s.mode)) return clampI(s.minInHour, 0, 59) + " * * * *";
+        if ("min".equals(s.mode)) return "*/" + clampI(s.everyMin, 1, 59) + " * * * *";
+        if ("month".equals(s.mode)) return m + " " + h + " " + clampI(s.dom, 1, 31) + " * *";
+        return s.raw.trim();
+    }
+
+    private String hhmm(int hour, int minute) {
+        return String.format(Locale.ROOT, "%02d:%02d", clampI(hour, 0, 23), clampI(minute, 0, 59));
+    }
+
+    /** 人话描述，显示在编辑框里 */
+    private String describeSchedule(String expr) {
+        Sched s = parseSchedule(expr);
+        if ("day".equals(s.mode)) return "每天 " + hhmm(s.hour, s.minute) + " 跑一次";
+        if ("week".equals(s.mode)) {
+            StringBuilder w = new StringBuilder();
+            for (Integer d : s.weeks) {
+                int idx = 0;
+                for (int i = 0; i < WEEK_VALUES.length; i++) if (WEEK_VALUES[i] == d) idx = i;
+                if (w.length() > 0) w.append("、");
+                w.append("周").append(WEEK_LABELS[idx]);
+            }
+            return "每周 " + w + " " + hhmm(s.hour, s.minute) + " 跑一次";
+        }
+        if ("hour".equals(s.mode)) return "每小时的第 " + s.minInHour + " 分跑一次";
+        if ("min".equals(s.mode)) return "每 " + s.everyMin + " 分钟跑一次";
+        if ("month".equals(s.mode)) return "每月 " + s.dom + " 日 " + hhmm(s.hour, s.minute) + " 跑一次";
+        return "自定义：" + expr;
+    }
+
+    private void openCronEditor(Cron existing) {
+        new CronEditor(existing, existing == null).show();
+    }
+
+    /** 用已有内容预填，但仍按"新建"提交 */
+    private void openCronEditor(Cron prefill, boolean asNew) {
+        new CronEditor(prefill, asNew).show();
+    }
+
+    /** 任务编辑：名称 / 命令 / 定时（每天·每周·每小时…）/ 启用 */
+    private class CronEditor {
+        final boolean isNew;
+        final Cron src;
+        final Sched s;
+        EditText eName, eCmd, eTime, eHourMin, eEveryMin, eDom, eRaw;
+        CheckBox cbOn;
+        LinearLayout weekRow;
+        TextView preview, timeLabel, domLabel;
+        final TextView[] chips = new TextView[MODE_KEYS.length];
+        final TextView[] weekChips = new TextView[WEEK_VALUES.length];
+
+        CronEditor(Cron existing, boolean newMode) {
+            isNew = newMode;
+            src = existing;
+            s = parseSchedule(existing == null ? "" : existing.schedule);
+            if (isNew) {
+                s.mode = "day";
+                s.hour = 8;
+                s.minute = 0;
+            }
+        }
+
+        int modeIndex() {
+            for (int i = 0; i < MODE_KEYS.length; i++) if (MODE_KEYS[i].equals(s.mode)) return i;
+            return MODE_KEYS.length - 1;
+        }
+
+        void show() {
+            LinearLayout box = new LinearLayout(MainActivity.this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(dp(16), dp(4), dp(16), dp(4));
+
+            eName = input("任务名（可留空）", src == null ? "" : src.name, false);
+            box.addView(fieldLabel("任务名称"));
+            box.addView(eName);
+
+            eCmd = input("命令，如 task sign.js、python3 run.py、bash job.sh", src == null ? "" : src.command, false);
+            eCmd.setSingleLine(false);
+            eCmd.setMinLines(2);
+            eCmd.setTypeface(android.graphics.Typeface.MONOSPACE);
+            box.addView(fieldLabel("执行命令"));
+            box.addView(eCmd);
+
+            box.addView(fieldLabel("定时规则"));
+            HorizontalScrollView hs = new HorizontalScrollView(MainActivity.this);
+            hs.setHorizontalScrollBarEnabled(false);
+            LinearLayout bar = new LinearLayout(MainActivity.this);
+            bar.setOrientation(LinearLayout.HORIZONTAL);
+            for (int i = 0; i < MODE_KEYS.length; i++) {
+                final int idx = i;
+                chips[i] = chip(MODE_LABELS[i], false, new Runnable() {
+                    public void run() {
+                        s.mode = MODE_KEYS[idx];
+                        refresh();
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.rightMargin = dp(6);
+                chips[i].setLayoutParams(lp);
+                bar.addView(chips[i]);
+            }
+            hs.addView(bar);
+            box.addView(hs);
+
+            eTime = input("08:30", hhmm(s.hour, s.minute), false);
+            eTime.setInputType(InputType.TYPE_CLASS_DATETIME);
+            timeLabel = fieldLabel("几点几分（时:分）");
+            box.addView(timeLabel);
+            box.addView(eTime);
+            eTime.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+                public void afterTextChanged(Editable ed) {
+                    parseTime(ed.toString());
+                    updatePreview();
+                }
+            });
+
+            weekRow = new LinearLayout(MainActivity.this);
+            weekRow.setOrientation(LinearLayout.HORIZONTAL);
+            for (int i = 0; i < WEEK_VALUES.length; i++) {
+                final int val = WEEK_VALUES[i];
+                weekChips[i] = chip(WEEK_LABELS[i], false, new Runnable() {
+                    public void run() {
+                        if (s.weeks.contains(val)) s.weeks.remove(val);
+                        else s.weeks.add(val);
+                        refresh();
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+                lp.rightMargin = dp(4);
+                weekChips[i].setLayoutParams(lp);
+                weekRow.addView(weekChips[i]);
+            }
+            box.addView(fieldLabel("星期几（可多选）"));
+            box.addView(weekRow);
+
+            eHourMin = input("0-59", String.valueOf(s.minInHour), false);
+            eHourMin.setInputType(InputType.TYPE_CLASS_NUMBER);
+            box.addView(fieldLabel("每小时的第几分跑（0-59）"));
+            box.addView(eHourMin);
+            eHourMin.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+                public void afterTextChanged(Editable ed) {
+                    s.minInHour = parseInt(ed.toString(), 0, 0, 59);
+                    updatePreview();
+                }
+            });
+
+            eEveryMin = input("1-59", String.valueOf(s.everyMin), false);
+            eEveryMin.setInputType(InputType.TYPE_CLASS_NUMBER);
+            box.addView(fieldLabel("每隔几分钟跑一次（1-59）"));
+            box.addView(eEveryMin);
+            eEveryMin.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+                public void afterTextChanged(Editable ed) {
+                    s.everyMin = parseInt(ed.toString(), 30, 1, 59);
+                    updatePreview();
+                }
+            });
+
+            eDom = input("1-31", String.valueOf(s.dom), false);
+            eDom.setInputType(InputType.TYPE_CLASS_NUMBER);
+            domLabel = fieldLabel("每月第几日（1-31）");
+            box.addView(domLabel);
+            box.addView(eDom);
+            eDom.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+                public void afterTextChanged(Editable ed) {
+                    s.dom = parseInt(ed.toString(), 1, 1, 31);
+                    updatePreview();
+                }
+            });
+
+            eRaw = input("5 段：分 时 日 月 周", src == null ? "" : src.schedule, false);
+            eRaw.setTypeface(android.graphics.Typeface.MONOSPACE);
+            box.addView(fieldLabel("原始表达式（高级）"));
+            box.addView(eRaw);
+            eRaw.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence c, int a, int b, int d) {}
+                public void onTextChanged(CharSequence c, int a, int b, int d) {}
+                public void afterTextChanged(Editable ed) {
+                    s.raw = ed.toString().trim();
+                    updatePreview();
+                }
+            });
+
+            preview = tv2("", 11, C_SUB);
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            plp.topMargin = dp(12);
+            preview.setLayoutParams(plp);
+            box.addView(preview);
+
+            cbOn = check("启用这个任务", isNew ? true : (src == null || src.isDisabled == 0));
+            box.addView(cbOn);
+
+            ScrollView sv = new ScrollView(MainActivity.this);
+            sv.addView(box);
+            refresh();
+
+            AlertDialog d = dlg()
+                    .setTitle(isNew ? "新建任务" : "编辑任务")
+                    .setView(sv)
+                    .setPositiveButton("保存", null)
+                    .setNegativeButton("取消", null)
+                    .create();
+            final AlertDialog dd = d;
+            d.setOnShowListener(new DialogInterface.OnShowListener() {
+                public void onShow(DialogInterface dia) {
+                    ((AlertDialog) dia).getButton(AlertDialog.BUTTON_POSITIVE)
+                            .setOnClickListener(new View.OnClickListener() {
+                                public void onClick(View v) {
+                                    save(dd);
+                                }
+                            });
+                }
+            });
+            d.show();
+        }
+
+        void parseTime(String text) {
+            String t = text == null ? "" : text.trim();
+            int sep = t.indexOf(':');
+            if (sep < 0) sep = t.indexOf('：');
+            try {
+                if (sep > 0) {
+                    s.hour = clampI(Integer.parseInt(t.substring(0, sep).trim()), 0, 23);
+                    s.minute = clampI(Integer.parseInt(t.substring(sep + 1).trim()), 0, 59);
+                }
+            } catch (Exception ignore) {
+            }
+        }
+
+        int parseInt(String text, int def, int lo, int hi) {
+            try {
+                return clampI(Integer.parseInt(text.trim()), lo, hi);
+            } catch (Exception e) {
+                return def;
+            }
+        }
+
+        void refresh() {
+            int cur = modeIndex();
+            for (int i = 0; i < chips.length; i++) {
+                boolean on = i == cur;
+                chips[i].setTextColor(on ? C_ACC : C_SUB);
+                chips[i].setTypeface(chips[i].getTypeface(),
+                        on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+                GradientDrawable g = bg(on ? C_ACC_BG : C_FIELD, 9);
+                if (on) g.setStroke(dp(1), C_ACC_LINE);
+                chips[i].setBackground(g);
+            }
+            boolean isDay = "day".equals(s.mode), isWeek = "week".equals(s.mode);
+            boolean isHour = "hour".equals(s.mode), isMin = "min".equals(s.mode);
+            boolean isMonth = "month".equals(s.mode), isRaw = "raw".equals(s.mode);
+            eTime.setVisibility((isDay || isWeek || isMonth) ? View.VISIBLE : View.GONE);
+            timeLabel.setVisibility((isDay || isWeek || isMonth) ? View.VISIBLE : View.GONE);
+            weekRow.setVisibility(isWeek ? View.VISIBLE : View.GONE);
+            eHourMin.setVisibility(isHour ? View.VISIBLE : View.GONE);
+            eEveryMin.setVisibility(isMin ? View.VISIBLE : View.GONE);
+            eDom.setVisibility(isMonth ? View.VISIBLE : View.GONE);
+            domLabel.setVisibility(isMonth ? View.VISIBLE : View.GONE);
+            eRaw.setVisibility(isRaw ? View.VISIBLE : View.GONE);
+            for (int i = 0; i < weekChips.length; i++) {
+                boolean on = s.weeks.contains(WEEK_VALUES[i]);
+                weekChips[i].setTextColor(on ? C_ACC : C_SUB);
+                GradientDrawable g = bg(on ? C_ACC_BG : C_FIELD, 8);
+                if (on) g.setStroke(dp(1), C_ACC_LINE);
+                weekChips[i].setBackground(g);
+            }
+            updatePreview();
+        }
+
+        void updatePreview() {
+            if (preview == null) return;
+            String expr = buildSchedule(s);
+            preview.setText("到时这样跑：" + describeSchedule(expr) + "\n表达式：" + expr);
+        }
+
+        String currentSchedule() {
+            parseTime(eTime.getText().toString());
+            s.minInHour = parseInt(eHourMin.getText().toString(), s.minInHour, 0, 59);
+            s.everyMin = parseInt(eEveryMin.getText().toString(), 30, 1, 59);
+            s.dom = parseInt(eDom.getText().toString(), 1, 1, 31);
+            s.raw = eRaw.getText().toString().trim();
+            return buildSchedule(s);
+        }
+
+        void save(final AlertDialog d) {
+            final String name = eName.getText().toString().trim();
+            final String cmd = eCmd.getText().toString().trim();
+            if (cmd.length() == 0) {
+                toast("命令不能为空");
+                return;
+            }
+            final String expr = currentSchedule();
+            if (expr.length() == 0) {
+                toast("定时规则不能为空");
+                return;
+            }
+            String[] parts = expr.split("\\s+");
+            if (parts.length < 5) {
+                toast("表达式至少 5 段：分 时 日 月 周");
+                return;
+            }
+            toast("正在保存…");
+            pool.execute(new Runnable() {
+                public void run() {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put("name", name);
+                        body.put("command", cmd);
+                        body.put("schedule", expr);
+                        long newId = 0;
+                        if (isNew) {
+                            JSONObject r = client.post("/api/crons", body);
+                            JSONObject d0 = r.optJSONObject("data");
+                            if (d0 != null) newId = d0.optLong("id", 0);
+                        } else {
+                            body.put("id", src.id);
+                            client.put("/api/crons", body);
+                        }
+                        boolean want = cbOn.isChecked();
+                        boolean currently = isNew ? true : (src != null && src.isDisabled == 0);
+                        long target = isNew ? newId : (src == null ? 0 : src.id);
+                        if (target > 0 && want != currently) {
+                            JSONArray ids = new JSONArray().put(target);
+                            client.sendJson("PUT", "/api/crons/" + (want ? "enable" : "disable"), ids.toString());
+                        }
+                        ui.post(new Runnable() {
+                            public void run() {
+                                d.dismiss();
+                                toast(isNew ? "任务已创建" : "任务已更新");
+                                refreshData();
+                            }
+                        });
+                    } catch (final Exception e) {
+                        ui.post(new Runnable() {
+                            public void run() {
+                                toast("保存失败：" + describe(e));
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    private TextView chip(String label, boolean on, final Runnable onClick) {
+        TextView t = tv(label, 12, on ? C_ACC : C_SUB, on);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(12), dp(8), dp(12), dp(8));
+        GradientDrawable g = bg(on ? C_ACC_BG : C_FIELD, 9);
+        if (on) g.setStroke(dp(1), C_ACC_LINE);
+        t.setBackground(g);
+        t.setSingleLine(true);
+        t.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                onClick.run();
+            }
+        });
+        return t;
+    }
+
+    /** 变量编辑：名称 / 值 / 备注 / 启用 */
+    private void openEnvEditor(final EnvItem existing) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(4), dp(16), dp(4));
+
+        final EditText eName = input("变量名，如 JD_COOKIE", existing == null ? "" : existing.name, false);
+        box.addView(fieldLabel("名称（字母或下划线开头，只能字母数字下划线）"));
+        box.addView(eName);
+
+        final EditText eValue = input("变量的值", existing == null ? "" : existing.value, false);
+        eValue.setSingleLine(false);
+        eValue.setMinLines(3);
+        box.addView(fieldLabel("值"));
+        box.addView(eValue);
+
+        final EditText eRemarks = input("备注（可留空）", existing == null ? "" : existing.remarks, false);
+        box.addView(fieldLabel("备注"));
+        box.addView(eRemarks);
+
+        final CheckBox cbEnabled = check("启用这个变量", existing == null || existing.status == 0);
+        box.addView(cbEnabled);
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(box);
+
+        AlertDialog.Builder b = dlg()
+                .setTitle(existing == null ? "新建变量" : "编辑变量")
+                .setView(sv)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null);
+        if (existing != null) b.setNeutralButton("删除", null);
+        final AlertDialog d = b.create();
+        d.setOnShowListener(new DialogInterface.OnShowListener() {
+            public void onShow(DialogInterface dia) {
+                ((AlertDialog) dia).getButton(AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener(new View.OnClickListener() {
+                            public void onClick(View v) {
+                                String name = eName.getText().toString().trim();
+                                String value = eValue.getText().toString();
+                                String remarks = eRemarks.getText().toString().trim();
+                                boolean on = cbEnabled.isChecked();
+                                if (!name.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+                                    toast("变量名只能用字母、数字、下划线，且不能以数字开头");
+                                    return;
+                                }
+                                if (name.length() == 0) {
+                                    toast("名称不能为空");
+                                    return;
+                                }
+                                if (existing == null && value.length() == 0) {
+                                    toast("新建变量时值不能为空（青龙要求必填）");
+                                    return;
+                                }
+                                saveEnv(d, existing, name, value, remarks, on);
+                            }
+                        });
+                if (existing != null) {
+                    ((AlertDialog) dia).getButton(AlertDialog.BUTTON_NEUTRAL)
+                            .setOnClickListener(new View.OnClickListener() {
+                                public void onClick(View v) {
+                                    confirmDeleteEnv(d, existing);
+                                }
+                            });
+                }
+            }
+        });
+        d.show();
+    }
+
+    private void saveEnv(final AlertDialog d, final EnvItem existing,
+                         final String name, final String value, final String remarks, final boolean enabled) {
+        toast("正在保存…");
+        pool.execute(new Runnable() {
+            public void run() {
+                try {
+                    JSONArray created = null;
+                    if (existing == null) {
+                        JSONArray arr = new JSONArray();
+                        JSONObject o = new JSONObject();
+                        o.put("name", name);
+                        o.put("value", value);
+                        o.put("remarks", remarks);
+                        arr.put(o);
+                        JSONObject r = client.sendJson("POST", "/api/envs", arr.toString());
+                        created = arrOf(r);
+                    } else {
+                        JSONObject o = new JSONObject();
+                        o.put("id", existing.id);
+                        o.put("name", name);
+                        o.put("value", value);
+                        o.put("remarks", remarks);
+                        client.put("/api/envs", o);
+                    }
+                    // 启用/停用：新建后按返回的 id 处理，编辑时按原 id 处理
+                    long targetId = existing == null ? 0 : existing.id;
+                    if (existing == null && created != null && created.length() > 0) {
+                        JSONObject first = created.optJSONObject(0);
+                        if (first != null) targetId = first.optLong("id", 0);
+                    }
+                    boolean needToggle = existing == null
+                            ? !enabled
+                            : (enabled == (existing.status == 1));
+                    if (targetId > 0 && needToggle) {
+                        JSONArray ids = new JSONArray().put(targetId);
+                        client.sendJson("PUT", "/api/envs/" + (enabled ? "enable" : "disable"), ids.toString());
+                    }
+                    ui.post(new Runnable() {
+                        public void run() {
+                            d.dismiss();
+                            toast(existing == null ? "变量已创建" : "变量已更新");
+                            refreshData();
+                        }
+                    });
+                } catch (final Exception e) {
+                    ui.post(new Runnable() {
+                        public void run() {
+                            toast("保存失败：" + describe(e));
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void confirmDeleteEnv(final AlertDialog editor, final EnvItem e) {
+        dlg()
+                .setTitle("删除变量")
+                .setMessage(e.name + "\n删了就没了，确认？")
+                .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dd, int w) {
+                        editor.dismiss();
+                        pool.execute(new Runnable() {
+                            public void run() {
+                                try {
+                                    client.sendJson("DELETE", "/api/envs",
+                                            new JSONArray().put(e.id).toString());
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            toast("已删除");
+                                            refreshData();
+                                        }
+                                    });
+                                } catch (final Exception ex) {
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            toast("删除失败：" + describe(ex));
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private JSONArray arrOf(JSONObject r) {
+        if (r == null) return null;
+        JSONArray a = r.optJSONArray("data");
+        if (a != null) return a;
+        JSONObject d = r.optJSONObject("data");
+        if (d != null) return d.optJSONArray("data");
+        return null;
+    }
+
+    // ---------------- 上传脚本 ----------------
+
+    private void pickScript() {
+        if (client == null || token == null) {
+            toast("先登录再上传");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.setType("*/*");
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(i, "选择脚本文件"), REQ_SCRIPT);
+        } catch (Exception e) {
+            toast("这台手机没有可用的文件选择器");
+        }
+    }
+
+    private String uriName(Uri uri) {
+        String name = "";
+        try {
+            android.database.Cursor cur = getContentResolver().query(uri, null, null, null, null);
+            if (cur != null) {
+                try {
+                    if (cur.moveToFirst()) {
+                        int idx = cur.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                        if (idx >= 0) name = cur.getString(idx);
+                    }
+                } finally {
+                    cur.close();
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        if (name == null || name.length() == 0) {
+            name = uri.getLastPathSegment();
+            if (name != null && name.indexOf('/') > 0) name = name.substring(name.lastIndexOf('/') + 1);
+        }
+        return name == null ? "script.js" : name;
+    }
+
+    private byte[] uriBytes(Uri uri, int[] sizeOut) throws Exception {
+        java.io.InputStream is = getContentResolver().openInputStream(uri);
+        if (is == null) throw new Exception("读不到这个文件");
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        int total = 0;
+        while ((n = is.read(buf)) > 0) {
+            total += n;
+            if (total > 3 * 1024 * 1024) {
+                is.close();
+                throw new Exception("文件超过 3MB，青龙脚本一般没这么大");
+            }
+            bos.write(buf, 0, n);
+        }
+        is.close();
+        if (sizeOut != null && sizeOut.length > 0) sizeOut[0] = total;
+        return bos.toByteArray();
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req != REQ_SCRIPT || res != RESULT_OK || data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        final String name = uriName(uri);
+        final byte[] bytes;
+        try {
+            bytes = uriBytes(uri, new int[1]);
+        } catch (final Exception e) {
+            toast("读文件失败：" + e.getMessage());
+            return;
+        }
+        final EditText eDir = input("留空=scripts 根目录；或填子目录，如 my", "", false);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(18), dp(4), dp(18), dp(4));
+        wrap.addView(tv2("文件：" + name + "（" + (bytes.length / 1024 + 1) + "KB）", 12, C_SUB));
+        wrap.addView(fieldLabel("上传到哪个目录"));
+        wrap.addView(eDir);
+        dlg()
+                .setTitle("上传脚本")
+                .setView(wrap)
+                .setPositiveButton("上传", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        uploadScript(name, eDir.getText().toString().trim(), bytes);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void uploadScript(final String name, final String dir, final byte[] bytes) {
+        toast("正在上传…");
+        pool.execute(new Runnable() {
+            public void run() {
+                try {
+                    client.upload("/api/scripts", name, dir, bytes);
+                    ui.post(new Runnable() {
+                        public void run() {
+                            toast("已上传：" + (dir.length() > 0 ? dir + "/" : "scripts/") + name);
+                            askCreateTask(name, dir);
+                        }
+                    });
+                } catch (final Exception e) {
+                    ui.post(new Runnable() {
+                        public void run() {
+                            toast("上传失败：" + describe(e));
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private String suggestCommand(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".py")) return "python3 " + name;
+        if (lower.endsWith(".sh")) return "bash " + name;
+        if (lower.endsWith(".js") || lower.endsWith(".ts")) return "task " + name;
+        return "task " + name;
+    }
+
+    private void askCreateTask(final String filename, final String dir) {
+        dlg()
+                .setTitle("顺手建个任务？")
+                .setMessage("脚本已上传，要不要现在按它建一个定时任务？\n命令会先填成：" + suggestCommand(filename))
+                .setPositiveButton("建任务", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        Cron c = new Cron();
+                        c.name = filename;
+                        c.command = suggestCommand(filename);
+                        c.schedule = "0 8 * * *";
+                        openCronEditor(c, true);
+                    }
+                })
+                .setNegativeButton("不用", null)
+                .show();
     }
 
     // ---------------- 设置 ----------------
@@ -1161,7 +2449,7 @@ public class MainActivity extends Activity {
         c.addView(cbRemember);
         c.addView(cbIgnore);
 
-        TextView save = button("保存并重新登录", C_ACC, 0xFF06210F);
+        TextView save = button("保存并重新登录", C_ACC, C_ON_ACC);
         save.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 if (fBase.length() == 0) {
@@ -1176,6 +2464,34 @@ public class MainActivity extends Activity {
         });
         c.addView(save);
         contentBox.addView(c);
+
+        // 外观：黑白两版
+        LinearLayout look = card();
+        LinearLayout lrow = new LinearLayout(this);
+        lrow.setOrientation(LinearLayout.HORIZONTAL);
+        lrow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView lt = tv("外观", 13, C_TEXT, true);
+        lt.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        lrow.addView(lt);
+        lrow.addView(tv("dark".equals(themeName) ? "深色" : "浅色", 11, C_SUB, false));
+        look.addView(lrow);
+        TextView lsub = tv2("深色版护眼，浅色版白天看得清，切换立即生效", 11, C_SUB);
+        LinearLayout.LayoutParams lslp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lslp.topMargin = dp(4);
+        lsub.setLayoutParams(lslp);
+        look.addView(lsub);
+
+        LinearLayout lbar = new LinearLayout(this);
+        lbar.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lbLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lbLp.topMargin = dp(10);
+        lbar.setLayoutParams(lbLp);
+        lbar.addView(themeTab("深色", "dark"));
+        lbar.addView(themeTab("浅色", "light"));
+        look.addView(lbar);
+        contentBox.addView(look);
 
         LinearLayout out = pressCard();
         TextView logout = tv("退出登录", 13, C_RED, true);
@@ -1196,7 +2512,21 @@ public class MainActivity extends Activity {
 
         LinearLayout about = card();
         about.addView(tv("关于", 13, C_TEXT, true));
-        about.addView(field("客户端", "青龙助手 1.2"));
+        about.addView(field("客户端", "青龙助手 " + versionName()));
+        about.addView(field("外观", "dark".equals(themeName) ? "深色版" : "浅色版"));
+        about.addView(field("历史服务器", histCount() + " 条"));
+        if (histCount() > 0) {
+            TextView wipe = tv("清空历史服务器", 12, C_SUB, false);
+            wipe.setPadding(dp(2), dp(8), dp(2), dp(4));
+            wipe.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    clearHistory();
+                    toast("历史服务器已清空");
+                    render();
+                }
+            });
+            about.addView(wipe);
+        }
         about.addView(field("兼容", "青龙面板 2.x"));
         about.addView(field("当前方式", "open".equals(loginMode) ? "Client ID (OpenAPI)" : "账号密码"));
         about.addView(field("说明", "凭据只存本机"));
@@ -1299,7 +2629,7 @@ public class MainActivity extends Activity {
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setPadding(dp(18), dp(6), dp(18), 0);
         wrap.addView(e);
-        new AlertDialog.Builder(this)
+        dlg()
                 .setTitle("两步验证")
                 .setView(wrap)
                 .setPositiveButton("验证并登录", new DialogInterface.OnClickListener() {
@@ -1374,6 +2704,7 @@ public class MainActivity extends Activity {
         if (rem) ed.putString("token", tk);
         else ed.remove("token");
         ed.apply();
+        pushHistory(c.baseUrl, mode, a, b2);
         ui.post(new Runnable() {
             public void run() {
                 loading = false;
@@ -1446,14 +2777,41 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** 深色 / 浅色切换：存下来后整体重建界面 */
+    private TextView themeTab(String label, final String theme) {
+        boolean on = theme.equals(themeName);
+        TextView t = tv(label, 13, on ? C_ACC : C_SUB, on);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setPadding(0, dp(10), 0, dp(10));
+        GradientDrawable g = bg(on ? C_ACC_BG : C_FIELD, 10);
+        if (on) g.setStroke(dp(1), C_ACC_LINE);
+        t.setBackground(g);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        lp.rightMargin = dp(8);
+        t.setLayoutParams(lp);
+        t.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                if (theme.equals(themeName)) return;
+                sp.edit().putString("theme", theme).apply();
+                applyTheme(theme);
+                setContentView(buildRoot());
+                render();
+                toast("dark".equals(themeName) ? "已切换到深色版" : "已切换到浅色版");
+            }
+        });
+        return t;
+    }
+
     private TextView modeTab(String label, String mode) {
         boolean on = mode.equals(loginMode);
         TextView t = tv(label, 13, on ? C_ACC : C_SUB, on);
         t.setGravity(Gravity.CENTER);
         t.setSingleLine(true);
         t.setPadding(0, dp(10), 0, dp(10));
-        GradientDrawable g = bg(on ? 0xFF12281A : C_FIELD, 10);
-        if (on) g.setStroke(dp(1), 0x662BD96A);
+        GradientDrawable g = bg(on ? C_ACC_BG : C_FIELD, 10);
+        if (on) g.setStroke(dp(1), C_ACC_LINE);
         t.setBackground(g);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
@@ -1628,6 +2986,14 @@ public class MainActivity extends Activity {
     private String describe(Exception e) {
         String s = describeLogin(e);
         return s.startsWith("登录失败：") ? s.substring(5) : s;
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "1.3";
+        }
     }
 
     private void toast(String s) {

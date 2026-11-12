@@ -65,6 +65,73 @@ public class QlClient {
         return request("POST", path, body == null ? "{}" : body.toString());
     }
 
+    /** 青龙部分接口（run/stop/enable/disable/删除）body 是纯数组，如 [12] */
+    public JSONObject sendJson(String method, String path, String rawJson) throws Exception {
+        return request(method, path, rawJson);
+    }
+
+    /** multipart 上传文件（脚本上传 POST /scripts） */
+    public JSONObject upload(String path, String filename, String dir, byte[] data) throws Exception {
+        if (baseUrl == null || baseUrl.length() == 0) throw new ApiException(0, "未配置面板地址");
+        String boundary = "----QlBoundary" + System.currentTimeMillis();
+        String full = path;
+        if ("/open".equals(prefix)) {
+            if (full.startsWith("/api/")) full = "/open/" + full.substring(5);
+        }
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(baseUrl + full);
+            conn = (HttpURLConnection) url.openConnection();
+            if (conn instanceof HttpsURLConnection && ignoreCert) trustAll((HttpsURLConnection) conn);
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("User-Agent", "QlAssistant/1.0");
+            if (token != null && token.length() > 0) {
+                conn.setRequestProperty("Authorization", "Bearer " + token);
+            }
+            OutputStream os = conn.getOutputStream();
+            StringBuilder head = new StringBuilder();
+            head.append("--").append(boundary).append("\r\n")
+                    .append("Content-Disposition: form-data; name=\"filename\"\r\n\r\n")
+                    .append(filename).append("\r\n");
+            if (dir != null && dir.length() > 0) {
+                head.append("--").append(boundary).append("\r\n")
+                        .append("Content-Disposition: form-data; name=\"path\"\r\n\r\n")
+                        .append(dir).append("\r\n");
+            }
+            head.append("--").append(boundary).append("\r\n")
+                    .append("Content-Disposition: form-data; name=\"file\"; filename=\"")
+                    .append(filename).append("\"\r\n")
+                    .append("Content-Type: application/octet-stream\r\n\r\n");
+            os.write(head.toString().getBytes("UTF-8"));
+            os.write(data);
+            os.write(("\r\n--" + boundary + "--\r\n").getBytes("UTF-8"));
+            os.flush();
+            os.close();
+
+            int status = conn.getResponseCode();
+            String text = readAll(status >= 400 ? conn.getErrorStream() : conn.getInputStream());
+            JSONObject json = null;
+            try {
+                json = new JSONObject(text);
+            } catch (Exception ignore) {
+            }
+            if (status == 401) throw new ApiException(401, "登录已失效，请重新登录");
+            if (json == null) {
+                throw new ApiException(status, "上传失败（HTTP " + status + "），服务器返回非 JSON 内容");
+            }
+            int code = json.optInt("code", status);
+            if (code != 200) throw new ApiException(code, msgOf(json, "上传失败(" + code + ")"));
+            return json;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
     public JSONObject request(String method, String path, String body) throws Exception {
         if (baseUrl == null || baseUrl.length() == 0) {
             throw new ApiException(0, "未配置面板地址");
