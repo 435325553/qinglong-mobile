@@ -26,6 +26,7 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -213,6 +214,17 @@ public class MainActivity extends Activity {
     private TextView subtitle;
     private TextView statePill;
     private ProgressBar busyBar;
+    private PullRefreshScrollView pullScroll;
+    private TextView pullHint;
+
+    // 实时刷新（任务状态 / 日志）
+    private Runnable autoTick;
+    private String lastSig = "";
+    private AlertDialog logDialog;
+    private TextView logText;
+    private ScrollView logSv;
+    private Runnable logTick;
+    private long logCronId = -1;
 
     private String loginMode = "pwd";
     private String themeName = "dark";
@@ -516,6 +528,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopAutoRefresh();
+        stopLogPoll();
         super.onDestroy();
         pool.shutdownNow();
     }
@@ -679,18 +693,55 @@ public class MainActivity extends Activity {
         busyBar.setVisibility(View.GONE);
         root.addView(busyBar);
 
-        // 内容区
-        ScrollView sv = new ScrollView(this);
-        sv.setFillViewport(true);
+        // 内容区：可滚动 + 顶部下拉刷新
+        pullScroll = new PullRefreshScrollView(this);
+        pullScroll.setFillViewport(true);
+        pullScroll.setVerticalScrollBarEnabled(false);
         LinearLayout.LayoutParams slp2 = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
-        sv.setLayoutParams(slp2);
+        pullScroll.setLayoutParams(slp2);
+
         contentBox = new LinearLayout(this);
         contentBox.setOrientation(LinearLayout.VERTICAL);
         contentBox.setPadding(dp(14), dp(6), dp(14), dp(30));
         applyContentWidth();
-        sv.addView(contentBox);
-        root.addView(sv);
+        pullScroll.addView(contentBox);
+
+        pullHint = tv("下拉刷新", 11, C_SUB, false);
+        pullHint.setGravity(Gravity.CENTER);
+        pullHint.setAlpha(0f);
+
+        FrameLayout scrollWrap = new FrameLayout(this);
+        scrollWrap.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        scrollWrap.addView(pullScroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams hlp2 = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hlp2.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        hlp2.topMargin = dp(8);
+        pullHint.setLayoutParams(hlp2);
+        scrollWrap.addView(pullHint);
+        root.addView(scrollWrap);
+
+        pullScroll.setListener(new PullRefreshScrollView.Listener() {
+            public void onPull(float fraction) {
+                if (pullHint == null) return;
+                pullHint.setAlpha(Math.min(1f, fraction));
+                pullHint.setText(fraction >= 1f ? "松开刷新" : "下拉刷新");
+                pullHint.setTextColor(fraction >= 1f ? C_ACC : C_SUB);
+            }
+
+            public void onRefresh() {
+                if (loading) return;
+                if (token == null) {
+                    render();
+                    resetPullHint();
+                } else {
+                    refreshData();
+                }
+            }
+        });
 
         // 底部标签
         tabBar = new LinearLayout(this);
@@ -708,8 +759,7 @@ public class MainActivity extends Activity {
     }
 
     /** 手机上铺满宽度，横屏/平板上限 560dp 居中，避免卡片被拉得过长 */
-    private void applyContentWidth() {
-        if (contentBox == null) return;
+    private void applyContentWidth() {        if (contentBox == null) return;
         int screen = getResources().getDisplayMetrics().widthPixels;
         int maxWidth = dp(560) + dp(28);
         int w = Math.min(screen, maxWidth);
@@ -1413,6 +1463,26 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** 取一次任务日志（后台线程调用） */
+    private String fetchLog(Cron c) throws Exception {
+        JSONObject r = client.get("/api/crons/" + c.id + "/log?tail=true&limit=200000");
+        Object data = r.opt("data");
+        String content = null;
+        if (data instanceof JSONArray) {
+            JSONArray arr = (JSONArray) data;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < arr.length(); i++) sb.append(arr.optString(i)).append("\n");
+            content = sb.toString();
+        } else if (data instanceof String) {
+            content = (String) data;
+        } else if (data != null) {
+            JSONObject d = r.optJSONObject("data");
+            if (d != null) content = d.optString("content", d.toString());
+        }
+        if (content == null || content.trim().length() == 0) content = "暂无日志内容";
+        return content;
+    }
+
     private void loadLog(final Cron c) {
         toast("正在读取日志…");
         pool.execute(new Runnable() {
@@ -1420,22 +1490,7 @@ public class MainActivity extends Activity {
                 String content = null;
                 String err = null;
                 try {
-                    JSONObject r = client.get("/api/crons/" + c.id + "/log?tail=true&limit=200000");
-                    Object data = r.opt("data");
-                    if (data instanceof JSONArray) {
-                        JSONArray arr = (JSONArray) data;
-                        StringBuilder sb = new StringBuilder();
-                        for (int i = 0; i < arr.length(); i++) sb.append(arr.optString(i)).append("\n");
-                        content = sb.toString();
-                    } else if (data instanceof String) {
-                        content = (String) data;
-                    } else if (data != null) {
-                        JSONObject d = r.optJSONObject("data");
-                        if (d != null) content = d.optString("content", d.toString());
-                    }
-                    if (content == null || content.trim().length() == 0) {
-                        content = "暂无日志内容";
-                    }
+                    content = fetchLog(c);
                 } catch (Exception e) {
                     err = describe(e);
                 }
@@ -1454,28 +1509,98 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void showLog(Cron c, String content) {
+    /** 日志窗口：打开即滚到底，之后每 3 秒拉一次增量；手动上滑阅读时不强制跟随 */
+    private void showLog(final Cron c, String content) {
+        logCronId = c.id;
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setBackgroundColor(C_LOG_BG);
         box.setPadding(dp(12), dp(6), dp(12), dp(6));
-        ScrollView sv = new ScrollView(this);
-        TextView t = tv(content, 11, C_LOG_TEXT, false);
-        t.setTypeface(android.graphics.Typeface.MONOSPACE);
-        t.setTextIsSelectable(true);
-        t.setLineSpacing(dp(1), 1.0f);
-        sv.addView(t);
-        box.addView(sv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        logSv = new ScrollView(this);
+        logText = tv(content, 11, C_LOG_TEXT, false);
+        logText.setTypeface(android.graphics.Typeface.MONOSPACE);
+        logText.setTextIsSelectable(true);
+        logText.setLineSpacing(dp(1), 1.0f);
+        logSv.addView(logText);
+        box.addView(logSv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
         LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.addView(box, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
 
-        AlertDialog d = dlg()
-                .setTitle("日志 · " + (c.name.length() > 0 ? c.name : ("#" + c.id)))
+        logDialog = dlg()
+                .setTitle("日志 · " + (c.name.length() > 0 ? c.name : ("#" + c.id)) + "（实时）")
                 .setView(wrap)
                 .setPositiveButton("关闭", null)
                 .show();
+        logDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            public void onDismiss(DialogInterface d) {
+                stopLogPoll();
+                logDialog = null;
+            }
+        });
+
+        scrollLogToBottom();
+        startLogPoll(c);
+    }
+
+    private boolean isLogAtBottom() {
+        if (logSv == null || logText == null) return true;
+        int viewH = logSv.getHeight();
+        if (viewH <= 0) return true;
+        return logText.getHeight() - (logSv.getScrollY() + viewH) <= dp(32);
+    }
+
+    private void scrollLogToBottom() {
+        if (logSv == null) return;
+        logSv.post(new Runnable() {
+            public void run() {
+                if (logSv != null) logSv.fullScroll(View.FOCUS_DOWN);
+            }
+        });
+    }
+
+    private void applyLog(String txt, boolean stickBottom) {
+        if (logText == null || logDialog == null || !logDialog.isShowing()) return;
+        if (txt.contentEquals(logText.getText())) return;   // 没新内容，不动
+        logText.setText(txt);
+        if (stickBottom) scrollLogToBottom();
+    }
+
+    private void startLogPoll(final Cron c) {
+        stopLogPoll();
+        logTick = new Runnable() {
+            public void run() {
+                if (logDialog == null || !logDialog.isShowing()) return;
+                final boolean stick = isLogAtBottom();
+                pool.execute(new Runnable() {
+                    public void run() {
+                        String txt = null;
+                        try {
+                            txt = fetchLog(c);
+                        } catch (Exception ignore) {
+                        }
+                        final String ft = txt;
+                        ui.post(new Runnable() {
+                            public void run() {
+                                if (ft != null) applyLog(ft, stick);
+                                if (logTick != null) ui.postDelayed(logTick, 3000);
+                            }
+                        });
+                    }
+                });
+            }
+        };
+        ui.postDelayed(logTick, 3000);
+    }
+
+    private void stopLogPoll() {
+        if (logTick != null) ui.removeCallbacks(logTick);
+        logTick = null;
     }
 
     // ---------------- 环境变量 ----------------
@@ -2837,10 +2962,14 @@ public class MainActivity extends Activity {
     }
 
     private void refreshData() {
+        refreshData(false);
+    }
+
+    private void refreshData(final boolean silent) {
         if (client == null) return;
-        loading = true;
+        loading = !silent;
         errMsg = null;
-        render();
+        if (!silent) render();
         pool.execute(new Runnable() {
             public void run() {
                 final StringBuilder err = new StringBuilder();
@@ -2896,10 +3025,16 @@ public class MainActivity extends Activity {
                                 autoLogin();
                                 return;
                             }
-                        } else {
-                            errMsg = msg;
+                            render();
+                            return;
                         }
-                        render();
+                        errMsg = msg;
+                        // 静默轮询：数据没变就不重绘，避免打断正在输入的搜索框
+                        String sig = dataSig();
+                        if (!silent || !sig.equals(lastSig)) {
+                            lastSig = sig;
+                            render();
+                        }
                     }
                 });
             }
@@ -2908,6 +3043,60 @@ public class MainActivity extends Activity {
 
     private boolean isAuth(Exception e) {
         return e instanceof QlClient.ApiException && ((QlClient.ApiException) e).code == 401;
+    }
+
+    /** 数据指纹：静默轮询时用来判断「有没有变化」，没变化就不重绘 */
+    private String dataSig() {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < crons.size(); i++) {
+            Cron c = crons.get(i);
+            b.append(c.id).append(':').append(c.status).append(':').append(c.isDisabled)
+                    .append(':').append(c.lastExec).append(':').append(c.lastRun).append('|');
+        }
+        b.append('#').append(envs.size());
+        b.append('#').append(sys != null ? sys.toString().hashCode() : 0);
+        b.append('#').append(errMsg);
+        return b.toString();
+    }
+
+    /** 有任务在跑就 5 秒一刷，全空闲 12 秒一刷，少折腾面板 */
+    private int autoInterval() {
+        for (int i = 0; i < crons.size(); i++) {
+            if (crons.get(i).status == 0) return 5000;
+        }
+        return 12000;
+    }
+
+    /** 静默同步：任务运行状态、上次执行时间跟着变 */
+    private void startAutoRefresh() {
+        stopAutoRefresh();
+        autoTick = new Runnable() {
+            public void run() {
+                if (token != null && client != null && !loading && !isFinishing()
+                        && !(getCurrentFocus() instanceof EditText)) {
+                    refreshData(true);
+                }
+                ui.postDelayed(this, autoInterval());
+            }
+        };
+        ui.postDelayed(autoTick, 5000);
+    }
+
+    private void stopAutoRefresh() {
+        if (autoTick != null) ui.removeCallbacks(autoTick);
+        autoTick = null;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        startAutoRefresh();
+    }
+
+    @Override
+    protected void onPause() {
+        stopAutoRefresh();
+        super.onPause();
     }
 
     /** 兼容不同版本返回结构，取出数组 */
@@ -3004,5 +3193,96 @@ public class MainActivity extends Activity {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         cm.setPrimaryClip(ClipData.newPlainText("ql", s == null ? "" : s));
         toast("已复制到剪贴板");
+    }
+
+    /** 收起下拉刷新的提示条 */
+    private void resetPullHint() {
+        if (pullHint != null) {
+            pullHint.animate().alpha(0f).setDuration(150).start();
+            pullHint.setText("下拉刷新");
+            pullHint.setTextColor(C_SUB);
+        }
+        if (pullScroll != null) pullScroll.resetPull();
+    }
+
+    /**
+     * 下拉刷新容器：内容在顶部时向下拖过阈值即触发刷新。
+     * 不依赖 SwipeRefreshLayout，避免引入 androidx。
+     */
+    private static class PullRefreshScrollView extends ScrollView {
+
+        interface Listener {
+            void onPull(float fraction);
+
+            void onRefresh();
+        }
+
+        private Listener listener;
+        private final int touchSlop;
+        private final int threshold;
+        private final int maxPull;
+        private float startY = -1f;
+        private boolean pulling = false;
+
+        PullRefreshScrollView(Context c) {
+            super(c);
+            touchSlop = ViewConfiguration.get(c).getScaledTouchSlop();
+            float d = c.getResources().getDisplayMetrics().density;
+            threshold = (int) (56 * d);
+            maxPull = (int) (96 * d);
+        }
+
+        void setListener(Listener l) {
+            listener = l;
+        }
+
+        void resetPull() {
+            pulling = false;
+            startY = -1f;
+            animate().translationY(0f).setDuration(160).start();
+        }
+
+        @Override
+        public boolean onInterceptTouchEvent(MotionEvent ev) {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                startY = ev.getY();
+                pulling = false;
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                if (!pulling && startY >= 0 && getScrollY() <= 0
+                        && ev.getY() - startY > touchSlop) {
+                    pulling = true;
+                    startY = ev.getY() - touchSlop;
+                    return true;
+                }
+            } else {
+                startY = -1f;
+                pulling = false;
+            }
+            return super.onInterceptTouchEvent(ev);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent ev) {
+            if (!pulling) return super.onTouchEvent(ev);
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_MOVE) {
+                float dy = ev.getY() - startY;
+                float offset = Math.max(0f, Math.min(dy * 0.55f, maxPull));
+                setTranslationY(offset);
+                if (listener != null) listener.onPull(Math.min(1f, offset / threshold));
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                boolean fire = action == MotionEvent.ACTION_UP && getTranslationY() >= threshold;
+                resetPull();
+                if (listener != null) {
+                    listener.onPull(0f);
+                    if (fire) listener.onRefresh();
+                }
+                return true;
+            }
+            return true;
+        }
     }
 }
